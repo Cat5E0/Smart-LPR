@@ -81,7 +81,7 @@ void MainWindow::setupUi()
     QWidget *center = new QWidget;
     setCentralWidget(center);
     this->resize(1550, 950);
-    this->setWindowTitle("SmartLPR - Pro Benchmark (Real-time Analysis)");
+    this->setWindowTitle("SmartLPR - Pro Benchmark (Multi-Label Support)");
 
     QHBoxLayout *mainLay = new QHBoxLayout(center);
 
@@ -149,8 +149,13 @@ void MainWindow::setupUi()
 
     btnBatch = new QPushButton("📂 1. 加载测试集");
     btnFile = new QPushButton("📄 加载单张");
-    checkAutoCompare = new QCheckBox("自动 A/B 对比");
-    checkAutoCompare->setChecked(true);
+
+    // [修改] 使用 QComboBox 替换 CheckBox
+    comboModeSelect = new QComboBox();
+    comboModeSelect->addItem("🔄 A/B 完整对比 (Baseline -> Method)");
+    comboModeSelect->addItem("⚡ 仅测试 Method (OpenCV + API)");
+    comboModeSelect->addItem("☁️ 仅测试 Baseline (纯云端 API)");
+    comboModeSelect->setStyleSheet("font-size: 14px; padding: 5px;");
 
     btnRun = new QPushButton("🚀 2. 运行评估");
     btnRun->setMinimumHeight(45);
@@ -173,7 +178,7 @@ void MainWindow::setupUi()
 
     gl->addWidget(btnBatch);
     gl->addWidget(btnFile);
-    gl->addWidget(checkAutoCompare);
+    gl->addWidget(comboModeSelect); // [修改]
     gl->addWidget(btnRun);
     gl->addWidget(btnAnalyzeColor);
     gl->addWidget(btnExport);
@@ -207,18 +212,106 @@ void MainWindow::setupUi()
     mainLay->addLayout(rightLay, 1);
 }
 
-QString MainWindow::extractCategory(const QString &filePath) {
+// [修改] 智能加载 Split 文件，支持多标签叠加
+void MainWindow::loadSplitFiles(const QString &ccpdRootPath) {
+    fileCategoryMap.clear();
+    fileCategoryMap.reserve(300000);
+
+    QString splitDir = ccpdRootPath + "/split";
+
+    // 如果直接选的是 split 文件夹，或者选的是 images 父级
+    if (!QDir(splitDir).exists()) {
+        if(QDir(ccpdRootPath).dirName() == "split") splitDir = ccpdRootPath;
+        else if(QDir(ccpdRootPath + "/../split").exists()) splitDir = ccpdRootPath + "/../split";
+    }
+
+    QMap<QString, QString> targets;
+    targets["ccpd_challenge.txt"] = "Challenge";
+    targets["ccpd_tilt.txt"] = "Tilt";
+    targets["ccpd_blur.txt"] = "Blur";
+    targets["ccpd_weather.txt"] = "Weather";
+    targets["ccpd_rotate.txt"] = "Rotate";
+    targets["ccpd_db.txt"] = "DB";
+    targets["ccpd_fn.txt"] = "FN";
+
+    int loadedCount = 0;
+    for (auto it = targets.begin(); it != targets.end(); ++it) {
+        QFile file(splitDir + "/" + it.key());
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            while (!in.atEnd()) {
+                QString line = in.readLine();
+                if (line.length() < 5) continue;
+
+                int idx = line.lastIndexOf('/');
+                QString name = (idx != -1) ? line.mid(idx + 1) : line;
+
+                // === 核心：叠加标签 ===
+                // 即使这个文件已经是 "Tilt" 了，如果它也在 blur.txt 里，就再加上 "Blur"
+                fileCategoryMap[name].append(it.value());
+                fileCategoryMap[name].removeDuplicates(); // 去重
+            }
+            file.close();
+            loadedCount++;
+        }
+    }
+
+    if (loadedCount > 0) {
+        onLogMsg(QString("已加载 %1 个分类文件，支持多标签统计").arg(loadedCount));
+    } else {
+        onLogMsg("注意: 未找到 split/*.txt，将仅使用文件名智能分析。");
+    }
+}
+
+// [修改] 多标签提取逻辑
+QStringList MainWindow::extractCategories(const QString &filePath) {
     QString fileName = QFileInfo(filePath).fileName();
-    QString lowerName = fileName.toLower();
-    if (lowerName.contains("weather")) return "Weather";
-    if (lowerName.contains("rotate")) return "Rotate";
-    if (lowerName.contains("tilt")) return "Tilt";
-    if (lowerName.contains("blur")) return "Blur";
-    if (lowerName.contains("db")) return "DB";
-    if (lowerName.contains("fn")) return "FN";
-    if (lowerName.contains("challenge")) return "Challenge";
-    if (lowerName.contains("base")) return "Normal";
-    return "Normal";
+    QStringList result;
+
+    // 1. 查表 (可能包含多个)
+    if (fileCategoryMap.contains(fileName)) {
+        result.append(fileCategoryMap[fileName]);
+    }
+
+    // 2. 路径/文件名智能分析 (补充漏网之鱼)
+    QString lowerPath = filePath.toLower();
+
+    auto addIfUnique = [&](QString tag) {
+        if(!result.contains(tag)) result.append(tag);
+    };
+
+    if (lowerPath.contains("challenge")) addIfUnique("Challenge");
+    if (lowerPath.contains("tilt")) addIfUnique("Tilt");
+    if (lowerPath.contains("db")) addIfUnique("DB");
+    if (lowerPath.contains("fn")) addIfUnique("FN");
+    if (lowerPath.contains("rotate")) addIfUnique("Rotate");
+    if (lowerPath.contains("blur")) addIfUnique("Blur");
+    if (lowerPath.contains("weather")) addIfUnique("Weather");
+
+    // 3. 文件名参数智能解析
+    QStringList parts = fileName.split("-");
+    if (parts.size() >= 7) {
+        // Tilt
+        QStringList angles = parts[1].split("_");
+        if (angles.size() == 2) {
+            float h = abs(angles[0].toFloat());
+            float v = abs(angles[1].toFloat());
+            if (h > 25 || v > 25) addIfUnique("Tilt");
+        }
+        // Blur
+        int blurVal = parts[6].section('.', 0, 0).toInt();
+        if (blurVal > 20) addIfUnique("Blur");
+    }
+
+    // 4. 默认归类
+    if (result.isEmpty()) {
+        result.append("Normal");
+    } else {
+        // 如果有特殊标签，移除 Normal
+        if(result.size() > 1) result.removeAll("Normal");
+    }
+
+    return result;
 }
 
 QString MainWindow::parseGroundTruth(const QString &fileName) {
@@ -266,6 +359,9 @@ void MainWindow::onBtnBatchProcess() {
     QString dirPath = QFileDialog::getExistingDirectory(this, "选择 CCPD 数据集文件夹");
     if(dirPath.isEmpty()) return;
 
+    // 加载 Split 文件
+    loadSplitFiles(dirPath);
+
     QStringList filters; filters << "*.jpg" << "*.jpeg" << "*.png";
     QDirIterator it(dirPath, filters, QDir::Files, QDirIterator::Subdirectories);
 
@@ -283,10 +379,11 @@ void MainWindow::onBtnBatchProcess() {
         info.path = filePath;
         info.name = fi.fileName();
         info.truth = parseGroundTruth(fi.fileName());
-        info.category = extractCategory(filePath);
+        info.categories = extractCategories(filePath); // [修改]
 
         loadedFiles.append(info);
-        listFileQueue->addItem("[" + info.category + "] " + info.truth);
+        // [修改] 显示所有标签
+        listFileQueue->addItem("[" + info.categories.join(",") + "] " + info.truth);
     }
 
     if (loadedFiles.isEmpty()) {
@@ -307,25 +404,38 @@ void MainWindow::onBtnOpenFile() {
     info.path = path;
     info.name = QFileInfo(path).fileName();
     info.truth = parseGroundTruth(info.name);
-    info.category = extractCategory(path);
+    info.categories = extractCategories(path); // [修改]
 
     loadedFiles.append(info);
-    listFileQueue->addItem("[" + info.category + "] " + info.truth);
+    listFileQueue->addItem("[" + info.categories.join(",") + "] " + info.truth);
 }
 
+// [修改] 运行逻辑支持三种模式
 void MainWindow::onBtnRun() {
     if (loadedFiles.isEmpty()) { QMessageBox::warning(this, "提示", "请先加载数据"); return; }
-    if (checkAutoCompare->isChecked()) {
-        onLogMsg("=== 自动 A/B 对比: 阶段 1/2 (Baseline) ===");
+
+    int mode = comboModeSelect->currentIndex();
+
+    if (mode == 0) {
+        onLogMsg("=== 启动 A/B 对比: 阶段 1/2 (Baseline) ===");
         currentStage = STAGE_BASELINE;
-    } else {
+    }
+    else if (mode == 1) {
+        onLogMsg("=== 启动单模式: Method (OpenCV + API) ===");
         currentStage = STAGE_METHOD;
     }
+    else {
+        onLogMsg("=== 启动单模式: Baseline (纯 API) ===");
+        currentStage = STAGE_BASELINE;
+    }
+
     startBenchmarkPhase();
 }
 
 void MainWindow::startBenchmarkPhase() {
-    if (currentStage == STAGE_BASELINE || !checkAutoCompare->isChecked()) {
+    bool isSecondPhaseOfAB = (comboModeSelect->currentIndex() == 0 && currentStage == STAGE_METHOD);
+
+    if (!isSecondPhaseOfAB) {
         currentBatchData.clear();
         listFileQueue->clear();
         statsBase = MethodStats();
@@ -336,7 +446,7 @@ void MainWindow::startBenchmarkPhase() {
             item.filePath = info.path;
             item.fileName = info.name;
             item.groundTruth = info.truth;
-            item.category = info.category;
+            item.categories = info.categories; // [修改]
             currentBatchData.append(item);
             listFileQueue->addItem(info.truth);
         }
@@ -418,8 +528,11 @@ void MainWindow::showToast(const QString &text) {
 
 void MainWindow::finishBenchmarkPhase() {
     isBatchRunning = false;
+
+    int mode = comboModeSelect->currentIndex();
+
     if (currentStage == STAGE_BASELINE) {
-        if (checkAutoCompare->isChecked()) {
+        if (mode == 0) {
             showToast("Baseline 阶段完成，即将开始 Method 阶段...");
             QTimer::singleShot(2000, this, [=](){
                 onLogMsg("=== 阶段 2/2 (Method) 开始 ===");
@@ -428,9 +541,11 @@ void MainWindow::finishBenchmarkPhase() {
             });
         } else {
             showToast("Baseline 评估完成！");
+            currentStage = IDLE;
+            lblCurrentMode->setText("Mode: Idle");
         }
     } else {
-        showToast("所有评估已完成！");
+        showToast("评估已完成！");
         currentStage = IDLE;
         lblCurrentMode->setText("Mode: Idle");
     }
@@ -468,6 +583,7 @@ void MainWindow::updateTableUI() {
     updateRow(1, statsMethod);
 }
 
+// [修改] 核心：多标签统计逻辑
 void MainWindow::onCloudResult(QString plate, double conf, QRect rect) {
     if (!isBatchRunning) return;
     long now = QDateTime::currentMSecsSinceEpoch();
@@ -478,13 +594,20 @@ void MainWindow::onCloudResult(QString plate, double conf, QRect rect) {
     QString cleanGt = cleanPlateString(item.groundTruth);
     bool isCorrect = (cleanRes == cleanGt && !cleanRes.isEmpty());
     MethodStats *s = (currentStage == STAGE_BASELINE) ? &statsBase : &statsMethod;
+
+    // 全局只加一次
     s->totalTimeMs += cost;
     s->totalProcessed++;
     s->all.count++;
     if(isCorrect) s->all.correct++;
-    if(!s->subsets.contains(item.category)) s->subsets[item.category] = SubsetStats();
-    s->subsets[item.category].count++;
-    if(isCorrect) s->subsets[item.category].correct++;
+
+    // 分类统计：遍历所有标签，每个标签都计数
+    for (const QString &cat : item.categories) {
+        if(!s->subsets.contains(cat)) s->subsets[cat] = SubsetStats();
+        s->subsets[cat].count++;
+        if(isCorrect) s->subsets[cat].correct++;
+    }
+
     if (currentStage == STAGE_BASELINE) {
         item.plateBase = plate;
         item.timeBase = cost;
@@ -505,9 +628,6 @@ void MainWindow::onCloudResult(QString plate, double conf, QRect rect) {
     QTimer::singleShot(2200, this, &MainWindow::processNextBatchItem);
 }
 
-// ==========================================================
-// [核心修复] 混合策略实施点
-// ==========================================================
 void MainWindow::onVisionProcessed(ProcessResult result) {
     if (!isBatchRunning) return;
     BatchItem &item = currentBatchData[currentBatchIndex];
@@ -517,22 +637,16 @@ void MainWindow::onVisionProcessed(ProcessResult result) {
     QImage imageToUpload;
     QString strategyLog;
 
-    // [核心策略] 智能判断：OpenCV 结果是否可信？
-    // 条件：找到了 + 置信度高 (>0.6) + 截图尺寸够大 (>80px)
-    // 注意：80px 是 API 能稳定识别的经验下限
     bool isReliable = result.found &&
                       (result.confidenceScore > 0.6) &&
                       (result.plateImage.width() > 80);
 
     if (isReliable) {
-        // A. 相信 OpenCV，上传裁剪图 (节省带宽/费用)
         showImageInLabel(result.plateImage, lblPlateImage);
         imageToUpload = result.plateImage;
         strategyLog = QString("Method Strategy: CROP (Score: %1)").arg(result.confidenceScore);
     } else {
-        // B. OpenCV 不靠谱，上传原图 (保准确率)
-        // 使用 result.displayImage (即原图)
-        lblPlateImage->clear(); // 界面上清空裁剪图以示区别
+        lblPlateImage->clear();
         imageToUpload = result.displayImage;
         strategyLog = QString("Method Strategy: FULL (Fallback, Score: %1)").arg(result.confidenceScore);
     }
@@ -541,6 +655,7 @@ void MainWindow::onVisionProcessed(ProcessResult result) {
     remoteModel->recognizeLicensePlate(imageToUpload);
 }
 
+// [修改] 错误处理也支持多标签统计
 void MainWindow::onCloudError(QString errorMsg) {
     if (!isBatchRunning) { onLogMsg("Err: " + errorMsg); return; }
     long now = QDateTime::currentMSecsSinceEpoch();
@@ -551,8 +666,13 @@ void MainWindow::onCloudError(QString errorMsg) {
     s->totalTimeMs += cost;
     s->totalProcessed++;
     s->all.count++;
-    if(!s->subsets.contains(item.category)) s->subsets[item.category] = SubsetStats();
-    s->subsets[item.category].count++;
+
+    // 错误时，所有所属标签的 count 都 +1，但 correct 不加
+    for (const QString &cat : item.categories) {
+        if(!s->subsets.contains(cat)) s->subsets[cat] = SubsetStats();
+        s->subsets[cat].count++;
+    }
+
     if(currentStage == STAGE_BASELINE) {
         item.plateBase = "FAILED";
         item.timeBase = cost;
@@ -597,7 +717,11 @@ void MainWindow::updateListItemStatus(int index) {
     if(index < 0 || index >= listFileQueue->count()) return;
     QListWidgetItem *it = listFileQueue->item(index);
     BatchItem &data = currentBatchData[index];
-    QString text = QString("[%1] %2").arg(data.category).arg(data.groundTruth);
+
+    // [修改] 显示多标签
+    QString catStr = data.categories.join(",");
+    QString text = QString("[%1] %2").arg(catStr).arg(data.groundTruth);
+
     QString gt = cleanPlateString(data.groundTruth);
     if(!data.plateBase.isEmpty() && data.plateBase != "---")
         text += (cleanPlateString(data.plateBase) == gt) ? " [B:√]" : " [B:×]";
@@ -614,13 +738,13 @@ void MainWindow::onBtnExportErrors() {
     QFile file(path);
     if(file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream out(&file);
-        out << "FileName,Category,GroundTruth,BaseResult,MethodResult,Reason\n";
+        out << "FileName,Categories,GroundTruth,BaseResult,MethodResult,Reason\n"; // [修改] Header
         for(const auto &item : currentBatchData) {
             QString cleanGt = cleanPlateString(item.groundTruth);
             bool baseOk = (cleanPlateString(item.plateBase) == cleanGt);
             bool methOk = (cleanPlateString(item.plateMethod) == cleanGt);
             if(!baseOk || !methOk) {
-                out << item.fileName << "," << item.category << "," << item.groundTruth << "," << item.plateBase << "," << item.plateMethod << "," << item.errorReason << "\n";
+                out << item.fileName << "," << item.categories.join(";") << "," << item.groundTruth << "," << item.plateBase << "," << item.plateMethod << "," << item.errorReason << "\n";
             }
         }
         file.close();

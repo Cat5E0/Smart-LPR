@@ -9,20 +9,25 @@
 #include <QThread>
 #include <QListWidget>
 #include <QCheckBox>
+#include <QComboBox> // [新增] 下拉框
 #include <QTableWidget>
 #include <QMap>
+#include <QHash>     // [新增] 哈希表
+#include <QStringList> // [新增]
 #include <opencv2/opencv.hpp>
 
 #include "visionengine.h"
 #include "remotemodel.h"
 #include "imageprocessor.h"
-#include "coloranalyzer.h" // [新增]
+#include "coloranalyzer.h"
 
 struct BatchItem {
     QString filePath;
     QString fileName;
     QString groundTruth;
-    QString category;
+
+    // [修改] 支持多标签 (例如同时属于 Tilt 和 Blur)
+    QStringList categories;
 
     // --- Baseline ---
     QString plateBase;
@@ -53,7 +58,7 @@ struct BatchItem {
         correctBase = false;
         successMethod = false;
         correctMethod = false;
-        category = "Other";
+        categories.append("Normal"); // 默认为 Normal
     }
 };
 
@@ -85,9 +90,8 @@ private slots:
     void onBtnExportErrors();
     void onBtnDebugCV();
 
-    // [新增] 触发颜色分析
+    // 颜色分析
     void onBtnAnalyzeColor();
-    // [新增] 颜色分析回调
     void onAnalysisProgress(int current, int total);
     void onAnalysisFinished(QString path);
 
@@ -114,7 +118,12 @@ private:
     void displayBatchItem(int index);
 
     QString parseGroundTruth(const QString &fileName);
-    QString extractCategory(const QString &filePath);
+
+    // [修改] 返回多标签列表
+    QStringList extractCategories(const QString &filePath);
+
+    // [新增] 加载官方 Split 文件
+    void loadSplitFiles(const QString &ccpdRootPath);
 
     void updateTableUI();
 
@@ -137,11 +146,14 @@ private:
     QPushButton *btnRun;
     QPushButton *btnExport;
     QPushButton *btnDebugCV;
-    QPushButton *btnAnalyzeColor; // [新增]
+    QPushButton *btnAnalyzeColor;
 
     QPushButton *btnPrev;
     QPushButton *btnNext;
-    QCheckBox *checkAutoCompare;
+
+    // [修改] 替换 CheckBox 为 ComboBox
+    QComboBox *comboModeSelect;
+
     QTextEdit *txtLog;
 
     QTimer *timer;
@@ -149,11 +161,14 @@ private:
     QThread *visionThread;
     RemoteModel *remoteModel;
     ImageProcessor *imgProcessor;
-    ColorAnalyzer *colorAnalyzer; // [新增]
+    ColorAnalyzer *colorAnalyzer;
 
     cv::Mat currentMat;
     bool isBatchRunning;
     QVector<BatchItem> currentBatchData;
+
+    // [修改] 类别映射表 (文件名 -> 类别列表)
+    QHash<QString, QStringList> fileCategoryMap;
 
     enum RunStage { IDLE, STAGE_BASELINE, STAGE_METHOD };
     RunStage currentStage;
@@ -161,7 +176,7 @@ private:
     MethodStats statsBase;
     MethodStats statsMethod;
 
-    struct FileInfo { QString path; QString name; QString truth; QString category; };
+    struct FileInfo { QString path; QString name; QString truth; QStringList categories; };
     QVector<FileInfo> loadedFiles;
 
     int currentBatchIndex;
