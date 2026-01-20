@@ -42,7 +42,7 @@ void VisionEngine::extractTextureFeatures(const cv::Mat &src, cv::Mat &gray, cv:
     if(src.channels() == 3) cvtColor(src, gray, COLOR_BGR2GRAY);
     else gray = src.clone();
 
-    // CLAHE 光照均衡化 (保留这个神器，解决 DB 问题)
+    // CLAHE 光照均衡化 (解决 DB/Weather 问题)
     Ptr<CLAHE> clahe = createCLAHE(2.0, Size(8, 8));
     clahe->apply(gray, gray);
 
@@ -135,12 +135,11 @@ cv::Rect VisionEngine::detectPlateRobust(const cv::Mat &src)
     double maxScore = -1.0;
 
     for(const auto &r : candidates) {
-        // [修复] 尺寸初筛：必须通过基础几何检查
-        // 增加宽度上限：如果是 1600宽的图，车牌不太可能超过 800宽(1/2)
-        if(r.width < 30 || r.height < 10) continue;
+        // [修复] 尺寸初筛：过滤掉不可能的极小框
+        if(r.width < 60 || r.height < 20) continue;
         if(r.width > src.cols / 2 || r.height > src.rows / 2) continue;
 
-        // 长宽比初筛 (宽泛一点，交给 scorePlate 做精细检查)
+        // 长宽比初筛
         float ratio = (float)r.width / r.height;
         if(ratio < 1.2 || ratio > 7.0) continue;
 
@@ -203,47 +202,48 @@ bool VisionEngine::verifySizes(const cv::RotatedRect &candidate) {
     if(shortSide == 0) return false;
     float aspect = longSide / shortSide;
 
-    // 宽高比：1.2 ~ 7.0 (保持之前的放宽策略，容忍旋转)
     if(aspect < 1.2 || aspect > 7.0) return false;
 
-    // [新增] 绝对尺寸上限：防止把整个屏幕当车牌
-    // 假设 Resize 后宽度约 1600，如果长边 > 1000 肯定是假的
-    if(longSide < 30 || shortSide < 8) return false;
+    // [核心修复] 提升最小尺寸门槛
+    // 之前是 <30，太小了，导致截取到噪点发给阿里云报错 InvalidImage
+    // 现在要求至少 64x24
+    if(longSide < 64 || shortSide < 24) return false;
     if(longSide > 1000) return false;
 
     return true;
 }
 
 double VisionEngine::scorePlate(const cv::Mat &src, const cv::Rect &rect) {
-    // 1. 安全检查 & 边界处理
-    // 稍微把框往里缩一点点 (Padding)，避免边缘背景干扰颜色判断
+    // 1. 安全检查
     Rect safeRect = rect & Rect(0,0, src.cols, src.rows);
     if(safeRect.area() <= 0) return -1.0;
 
     // ---------------------------------------------------------
-    // 【新增核心 1】颜色验证 (Color Confirmation)
-    // 专门解决：进气格栅、散热孔、黑色保险杠被误检的问题
+    // 【核心修复】颜色评分逻辑优化
     // ---------------------------------------------------------
     Mat roi = src(safeRect);
     Mat hsvRoi;
     cvtColor(roi, hsvRoi, COLOR_BGR2HSV);
 
     Mat blueMask;
-    // 使用头文件里的宽松阈值 (S_MIN=20)
     inRange(hsvRoi,
             Scalar(HSV_H_MIN, HSV_S_MIN, HSV_V_MIN),
             Scalar(HSV_H_MAX, HSV_S_MAX, HSV_V_MAX),
             blueMask);
 
-    // 计算蓝色像素占比
     double blueRatio = (double)countNonZero(blueMask) / safeRect.area();
 
-    // [必杀技] 如果一个框里几乎没有蓝色 (< 5%)，那它绝对是进气格栅或烂树叶
-    // 直接给极低分，不用往下算了
-    if (blueRatio < 0.05) return -1.0;
+    // [关键修改] 不要因为蓝色少 (<0.05) 就直接 return -1.0
+    // 雨天、夜晚、反光会导致蓝色丢失，只要纹理好，也要保留
+    double colorScore = 0.0;
+    if (blueRatio < 0.05) {
+        colorScore = 0.1; // 低分保底
+    } else {
+        colorScore = 0.5 + blueRatio; // 高分奖励
+    }
 
     // ---------------------------------------------------------
-    // 2. 纹理穿线分析 (Scanline) - 优化版
+    // 2. 纹理穿线分析
     // ---------------------------------------------------------
     Mat grayRoi, sobelRoi, binRoi;
     if(roi.channels() == 3) cvtColor(roi, grayRoi, COLOR_BGR2GRAY);
@@ -254,7 +254,6 @@ double VisionEngine::scorePlate(const cv::Mat &src, const cv::Rect &rect) {
 
     int validLines = 0;
     int totalJumps = 0;
-    // 扫描 3 行：25%, 50%, 75% 高度处
     int rowsToScan[] = {binRoi.rows / 4, binRoi.rows / 2, binRoi.rows * 3 / 4};
 
     for(int r : rowsToScan) {
@@ -262,7 +261,6 @@ double VisionEngine::scorePlate(const cv::Mat &src, const cv::Rect &rect) {
         int jumps = 0;
         const uchar* ptr = binRoi.ptr<uchar>(r);
         for(int c = 0; c < binRoi.cols - 1; c++) {
-            // 检测跳变
             if(ptr[c] != ptr[c+1]) jumps++;
         }
         totalJumps += jumps;
@@ -271,15 +269,14 @@ double VisionEngine::scorePlate(const cv::Mat &src, const cv::Rect &rect) {
     double avgJumps = (validLines > 0) ? (double)totalJumps / validLines : 0;
 
     // ---------------------------------------------------------
-    // 3. 综合打分 (Score Calculation)
+    // 3. 综合打分
     // ---------------------------------------------------------
 
-    // A. 纹理分：针对车牌字符结构 (10-28次跳变)
+    // A. 纹理分
     double textureScore = 0.0;
-    if (avgJumps < 5) textureScore = 0.01;      // 太空 (路标/栏杆)
-    else if (avgJumps > 40) textureScore = 0.01; // 太乱 (树丛/地面)
+    if (avgJumps < 5) textureScore = 0.01;
+    else if (avgJumps > 45) textureScore = 0.01;
     else {
-        // 距离 18 (典型车牌跳变数) 越近分越高
         textureScore = 1.0 - abs(avgJumps - 18.0) / 25.0;
         if(textureScore < 0) textureScore = 0.01;
     }
@@ -289,19 +286,19 @@ double VisionEngine::scorePlate(const cv::Mat &src, const cv::Rect &rect) {
     double ratioScore = 1.0 - abs(ratio - 3.5) / 5.0;
     if(ratioScore < 0) ratioScore = 0;
 
-    // C. 颜色分 (新增)：蓝色越多越可信
-    // 我们可以让 colorScore 从 0.5 到 1.5 浮动，奖励颜色正的
-    double colorScore = 0.5 + blueRatio;
-
-    // D. 尺寸惩罚：依然压制巨大框
+    // D. 尺寸惩罚
     double sizePenalty = 1.0;
-    if(safeRect.width > src.cols * 0.55) sizePenalty = 0.2; // 超过55%宽度，严重扣分
+    if(safeRect.width > src.cols * 0.55) sizePenalty = 0.2;
 
-    // 最终得分 = 面积(封顶) * 形状 * 纹理 * 颜色 * 惩罚
+    // 最终得分
     double effectiveArea = min((double)safeRect.area(), 40000.0);
+
+    // 只有当纹理和颜色都极差时，才认为是垃圾
+    if(textureScore < 0.2 && colorScore < 0.2) return -1.0;
 
     return effectiveArea * ratioScore * textureScore * colorScore * sizePenalty;
 }
+
 QImage VisionEngine::matToQImage(const cv::Mat &mat) {
     if(mat.type() == CV_8UC1) {
         QImage image(mat.data, mat.cols, mat.rows, mat.step, QImage::Format_Grayscale8);

@@ -16,6 +16,7 @@
 #include <QHeaderView>
 #include <QPropertyAnimation>
 #include <QtConcurrent>
+#include <cmath> // [新增] 用于数学计算
 
 // === CCPD 映射表 ===
 const QStringList PROVINCES = {
@@ -24,10 +25,13 @@ const QStringList PROVINCES = {
     "桂", "琼", "川", "贵", "云", "藏", "陕", "甘", "青", "宁", "新",
     "警", "学", "O"
 };
+
+// [修正] 原代码里是数字 '0'，CCPD标准其实是字母 'O'
 const QStringList ALPHABETS = {
     "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N",
-    "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "0"
+    "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "O"
 };
+
 const QStringList ADS = {
     "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N",
     "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "0",
@@ -121,11 +125,11 @@ void MainWindow::setupUi()
     lblCurrentMode->setStyleSheet("font-weight: bold; color: blue; font-size: 14px;");
     statLayout->addWidget(lblCurrentMode);
 
-    // [核心修改] 移除了 FN 和 Tilt，剩下 7 列
-    // 表头：FPS, AP, Normal, DB, Blur, Rotate, Challenge
-    tableMainStats = new QTableWidget(2, 7);
+    // [UI 修改] 扩展表格列数，增加 Weather 和 Tilt
+    // 列定义: FPS, AP, Normal, Weather, Rotate, Tilt, Blur, Challenge, DB
+    tableMainStats = new QTableWidget(2, 9);
     QStringList headers;
-    headers << "FPS" << "AP (All)" << "Normal" << "DB" << "Blur" << "Rotate" << "Challenge";
+    headers << "FPS" << "AP (All)" << "Normal" << "Weather" << "Rotate" << "Tilt" << "Blur" << "Challenge" << "DB";
     QStringList vHeaders;
     vHeaders << "Baseline" << "Method";
 
@@ -138,7 +142,7 @@ void MainWindow::setupUi()
     );
     tableMainStats->setFixedHeight(120);
 
-    for(int r=0; r<2; r++) for(int c=0; c<7; c++)
+    for(int r=0; r<2; r++) for(int c=0; c<9; c++)
         tableMainStats->setItem(r, c, new QTableWidgetItem("-"));
 
     statLayout->addWidget(tableMainStats);
@@ -211,34 +215,64 @@ void MainWindow::setupUi()
     mainLay->addLayout(rightLay, 1);
 }
 
-// [核心] 移除了 FN 和 Tilt
+// ==========================================================
+// [核心修复] 分类逻辑: 唯成分论，文件名里有啥就是啥
+// ==========================================================
 QString MainWindow::extractCategory(const QString &filePath) {
-    QString lowerPath = filePath.toLower();
+    QString fileName = QFileInfo(filePath).fileName();
+    QString lowerName = fileName.toLower();
 
-    // 只保留存在的类别
-    if (lowerPath.contains("db")) return "DB";
-    if (lowerPath.contains("blur")) return "Blur";
-    // if (lowerPath.contains("fn")) return "FN"; // Removed
-    if (lowerPath.contains("rotate")) return "Rotate";
-    // if (lowerPath.contains("tilt")) return "Tilt"; // Removed
-    if (lowerPath.contains("challenge")) return "Challenge";
+    // 1. Weather (天气): 包含 weather
+    if (lowerName.contains("weather")) return "Weather";
 
+    // 2. Rotate (旋转): 包含 rotate
+    if (lowerName.contains("rotate")) return "Rotate";
+
+    // 3. Tilt (倾斜): 包含 tilt
+    if (lowerName.contains("tilt")) return "Tilt";
+
+    // 4. Blur (模糊): 包含 blur
+    if (lowerName.contains("blur")) return "Blur";
+
+    // 5. DB (困难背景/双层): 包含 db
+    if (lowerName.contains("db")) return "DB";
+
+    // 6. FN (极难/漏检): 包含 fn
+    if (lowerName.contains("fn")) return "FN";
+
+    // 7. Challenge (挑战): 包含 challenge
+    if (lowerName.contains("challenge")) return "Challenge";
+
+    // 8. Base (基础): 包含 base -> 归为 Normal
+    if (lowerName.contains("base")) return "Normal";
+
+    // 9. 兜底策略: 如果文件名里没有任何标记，默认归为 Normal
+    // 不要再去算角度了！因为Base数据本身就有角度，会导致误判。
     return "Normal";
 }
 
 QString MainWindow::parseGroundTruth(const QString &fileName) {
     QString base = QFileInfo(fileName).baseName();
     QStringList parts = base.split("-");
+
+    // CCPD文件名格式: Area-Tilt-BBox-Vertices-LP-Brightness-Blurriness
+    // 车牌信息在第5部分 (索引4)
     if (parts.size() >= 5) {
         QString labelPart = parts[4];
         QStringList codes = labelPart.split("_");
         if (codes.size() >= 7) {
             QString plate = "";
             bool ok = true;
+
+            // 省份
             int provIdx = codes[0].toInt();
             if(provIdx >= 0 && provIdx < PROVINCES.size()) plate += PROVINCES[provIdx]; else ok=false;
+
+            // 字母 (CCPD中 'O' 是填充位，不是数字0)
             int alphaIdx = codes[1].toInt();
             if(alphaIdx >= 0 && alphaIdx < ALPHABETS.size()) plate += ALPHABETS[alphaIdx]; else ok=false;
+
+            // 后5位
             for(int i=2; i < codes.size(); i++) {
                 int adIdx = codes[i].toInt();
                 if(adIdx >= 0 && adIdx < ADS.size()) plate += ADS[adIdx]; else ok=false;
@@ -246,6 +280,7 @@ QString MainWindow::parseGroundTruth(const QString &fileName) {
             if(ok) return plate;
         }
     }
+    // 如果解析失败，直接返回文件名作为真值（方便排查）
     return base;
 }
 
@@ -282,6 +317,7 @@ void MainWindow::onBtnBatchProcess() {
         QString fileName = QFileInfo(filePath).fileName();
 
         if (filePath.contains("/Analysis_Result/")) continue;
+        // 过滤非 CCPD 格式文件 (必须包含 '-')
         if (!fileName.contains("-")) continue;
 
         QFileInfo fi(filePath);
@@ -296,13 +332,13 @@ void MainWindow::onBtnBatchProcess() {
     }
 
     if (loadedFiles.isEmpty()) {
-        QMessageBox::warning(this, "警告", "未找到有效的 CCPD 格式图片！\n请确认目录选择正确，且图片文件名包含 '-' 字符。");
+        QMessageBox::warning(this, "警告", "未找到有效的 CCPD 格式图片！\n请确认目录选择正确。");
     }
 
     lblBatchStatus->setText(QString("已加载: %1 张").arg(loadedFiles.size()));
 
-    // 重置表格 (7列)
-    for(int r=0; r<2; r++) for(int c=0; c<7; c++)
+    // 重置表格 (9列)
+    for(int r=0; r<2; r++) for(int c=0; c<9; c++)
         tableMainStats->setItem(r, c, new QTableWidgetItem("-"));
 }
 
@@ -453,7 +489,7 @@ void MainWindow::finishBenchmarkPhase() {
     }
 }
 
-// [核心] 刷新表格 UI (7列)
+// [UI 刷新] 支持9列数据
 void MainWindow::updateTableUI() {
     auto updateRow = [&](int row, const MethodStats &stats) {
         double fps = 0.0;
@@ -467,7 +503,11 @@ void MainWindow::updateTableUI() {
         if(ap > 90.0) itemAP->setForeground(Qt::darkGreen);
         tableMainStats->setItem(row, 1, itemAP);
 
-        QStringList cats; cats << "Normal" << "DB" << "Blur" << "Rotate" << "Challenge"; // Removed FN, Tilt
+        // 对应 setupUi 里的列顺序:
+        // Normal, Weather, Rotate, Tilt, Blur, Challenge, DB
+        QStringList cats;
+        cats << "Normal" << "Weather" << "Rotate" << "Tilt" << "Blur" << "Challenge" << "DB";
+
         for(int i=0; i<cats.size(); i++) {
             QString cat = cats[i];
             QString text = "-";
@@ -540,26 +580,21 @@ void MainWindow::onVisionProcessed(ProcessResult result) {
     item.rectMethod = result.roi;
     drawBoxesAndShow(currentMat, item.rectBase, item.rectMethod);
 
-    // --- 修改开始 ---
     QImage imageToUpload;
     if (result.found && !result.plateImage.isNull()) {
-        // 情况A：OpenCV 成功切图，优先用切图
         showImageInLabel(result.plateImage, lblPlateImage);
         imageToUpload = result.plateImage;
     } else {
-        // 情况B：OpenCV 没找到 (兜底)，不要直接报错，而是上传原图试一试！
-        // 这样可以挽回很多 OpenCV 漏检的样本
-        // onCloudError("OpenCV No ROI"); // <--- 删掉这行
         lblPlateImage->clear();
-        // 转换原图并上传
         imageToUpload = visionEngine->matToQImage(currentMat);
     }
 
-    // 统一调用识别
     remoteModel->recognizeLicensePlate(imageToUpload);
-    // --- 修改结束 ---
 }
 
+// ==========================================================
+// [核心修复] 统计 Bug: 失败的样本必须计入总分母 (all.count)
+// ==========================================================
 void MainWindow::onCloudError(QString errorMsg) {
     if (!isBatchRunning) { onLogMsg("Err: " + errorMsg); return; }
 
@@ -567,6 +602,19 @@ void MainWindow::onCloudError(QString errorMsg) {
     long cost = now - itemStartTime;
     BatchItem &item = currentBatchData[currentBatchIndex];
     item.processed = true;
+
+    // --- 修复开始 ---
+    MethodStats *s = (currentStage == STAGE_BASELINE) ? &statsBase : &statsMethod;
+    s->totalTimeMs += cost;
+    s->totalProcessed++; // 总数+1
+
+    s->all.count++; // 准确率分母+1
+    // s->all.correct 不加，因为失败了
+
+    // 子集统计也要加分母
+    if(!s->subsets.contains(item.category)) s->subsets[item.category] = SubsetStats();
+    s->subsets[item.category].count++;
+    // --- 修复结束 ---
 
     if(currentStage == STAGE_BASELINE) {
         item.plateBase = "FAILED";
@@ -580,7 +628,10 @@ void MainWindow::onCloudError(QString errorMsg) {
     item.errorReason = errorMsg;
 
     onLogMsg(QString("[%1] Err: %2").arg(item.groundTruth).arg(errorMsg));
+
     updateListItemStatus(currentBatchIndex);
+    updateTableUI(); // 实时刷新表格
+
     displayResultToUI(item);
 
     QString modeName = (currentStage == STAGE_BASELINE) ? "Baseline" : "Method";
@@ -594,7 +645,7 @@ QString MainWindow::cleanPlateString(const QString &input) {
     QString res;
     for(QChar c : input) {
         if(c.isLetterOrNumber() || (c.script() == QChar::Script_Han)) {
-            if(c == 'O') res.append('0');
+            if(c == 'O') res.append('0'); // 这里是清洗结果，为了对比方便
             else res.append(c);
         }
     }

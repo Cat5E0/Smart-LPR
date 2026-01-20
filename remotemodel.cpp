@@ -18,63 +18,53 @@ RemoteModel::~RemoteModel() {}
 void RemoteModel::recognizeLicensePlate(const QImage &image) {
     if(image.isNull()) { emit errorOccurred("Image is Null"); return; }
 
-    // --- [优化1] 智能缩放：防止云端暴力压缩 ---
-    // CCPD原图分辨率较高，直接上传会被云端强制压缩导致模糊。
-    // 主动缩放到 OCR 最佳宽度 (约 2048px)，并使用高质量插值。
+    // 1. 尺寸拦截 (本地过滤垃圾图)
+    if(image.width() < 64 || image.height() < 24) {
+        emit errorOccurred("Image Too Small (Local Filtered)");
+        return;
+    }
+
+    retryCount = 0; // 重置重试计数
+
+    // 2. 智能缩放
     QImage uploadImg = image;
     if (uploadImg.width() > 2048) {
         uploadImg = uploadImg.scaledToWidth(2048, Qt::SmoothTransformation);
     }
-    // ---------------------------------------
 
     currentImageData.clear();
     QBuffer buffer(&currentImageData);
     buffer.open(QIODevice::WriteOnly);
-
-    // --- [优化2] 格式优化：使用 PNG 无损格式 ---
-    // 避免 JPG 压缩带来的边缘噪点（Ringing Artifacts）
-    uploadImg.save(&buffer, "PNG");
-    // ---------------------------------------
+    uploadImg.save(&buffer, "PNG"); // 使用 PNG 防止模糊
 
     if(currentImageData.size() == 0) { emit errorOccurred("Image Buffer Empty"); return; }
 
     emit statusLog(QString("Uploading... (%1 KB)").arg(currentImageData.size() / 1024.0));
 
-    // [注意] 后缀名改为 .png
+    // 3. 准备上传路径
     QString objectName = "lpr_auto_" + QUuid::createUuid().toString(QUuid::Id128) + ".png";
     QString host = QString("%1.oss-%2.aliyuncs.com").arg(bucketName).arg(region);
     QString ossUrl = "https://" + host + "/" + objectName;
 
-    QDateTime now = QDateTime::currentDateTimeUtc();
-    QString isoDate = now.toString("yyyyMMddTHHmmssZ");
-    QString dateShort = now.toString("yyyyMMdd");
+    // --- [修正] 切换回 OSS V1 签名 (更简单稳定) ---
+    // 格式: Authorization: OSS AccessKeyId:Signature
+    // Signature = Base64( HMAC-SHA1( Secret, Verb + "\n" + Content-Md5 + "\n" + Content-Type + "\n" + Date + "\n" + CanonicalizedResource ) )
 
-    QString canonicalUri = "/" + bucketName + "/" + objectName;
+    QDateTime now = QDateTime::currentDateTimeUtc().addMSecs(timeOffset);
+    QString dateStr = now.toString("ddd, dd MMM yyyy HH:mm:ss 'GMT'"); // RFC 1123 格式
 
-    // [注意] Content-Type 必须与实际上传格式一致，否则签名会挂
-    QString canonicalHeaders = "content-type:image/png\n"
-                               "host:" + host + "\n"
-                               "x-oss-content-sha256:UNSIGNED-PAYLOAD\n"
-                               "x-oss-date:" + isoDate + "\n";
-    QString additionalHeaders = "content-type;host;x-oss-content-sha256;x-oss-date";
-    QString canonicalRequest = "PUT\n" + canonicalUri + "\n\n" + canonicalHeaders + "\n" + additionalHeaders + "\nUNSIGNED-PAYLOAD";
-    QString stringToSign = "OSS4-HMAC-SHA256\n" + isoDate + "\n" + QString("%1/%2/oss/aliyun_v4_request").arg(dateShort).arg(region) + "\n" + sha256Hex(canonicalRequest.toUtf8());
+    QString contentType = "image/png";
+    QString resource = "/" + bucketName + "/" + objectName;
 
-    QByteArray keySecret = ("aliyun_v4" + accessKeySecret).toUtf8();
-    QByteArray dateKey = hmacSha256(keySecret, dateShort.toUtf8());
-    QByteArray regionKey = hmacSha256(dateKey, region.toUtf8());
-    QByteArray serviceKey = hmacSha256(regionKey, "oss");
-    QByteArray signingKey = hmacSha256(serviceKey, "aliyun_v4_request");
-    QString ossSignature = hmacSha256(signingKey, stringToSign.toUtf8()).toHex();
-    QString authHeader = QString("OSS4-HMAC-SHA256 Credential=%1/%2/%3/oss/aliyun_v4_request,AdditionalHeaders=%4,Signature=%5")
-                         .arg(accessKeyId).arg(dateShort).arg(region).arg(additionalHeaders).arg(ossSignature);
+    QString stringToSign = "PUT\n\n" + contentType + "\n" + dateStr + "\n" + resource;
+
+    QByteArray signature = QMessageAuthenticationCode::hash(stringToSign.toUtf8(), accessKeySecret.toUtf8(), QCryptographicHash::Sha1).toBase64();
+    QString authHeader = "OSS " + accessKeyId + ":" + signature;
 
     QNetworkRequest request((QUrl(ossUrl)));
-    // [注意] 请求头也要改为 image/png
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "image/png");
+    request.setHeader(QNetworkRequest::ContentTypeHeader, contentType);
     request.setRawHeader("Host", host.toUtf8());
-    request.setRawHeader("x-oss-date", isoDate.toUtf8());
-    request.setRawHeader("x-oss-content-sha256", "UNSIGNED-PAYLOAD");
+    request.setRawHeader("Date", dateStr.toUtf8()); // 必须有 Date 头
     request.setRawHeader("Authorization", authHeader.toUtf8());
 
     QNetworkReply *reply = netManager->put(request, currentImageData);
@@ -85,25 +75,35 @@ void RemoteModel::recognizeLicensePlate(const QImage &image) {
 void RemoteModel::onOssUploadFinished() {
     QNetworkReply *reply = qobject_cast<QNetworkReply *>(sender());
     if(!reply) return;
+
     if(reply->error() != QNetworkReply::NoError) {
+        // 如果上传失败，尝试读取服务器时间校准（防止是因为时间导致的 403）
+        parseServerTimeAndAdjust(reply);
         emit errorOccurred("OSS Upload Failed: " + reply->errorString());
-        reply->deleteLater(); return;
+        reply->deleteLater();
+        return;
     }
-    QString uploadedUrl = reply->property("uploaded_url").toString();
+
+    currentUploadedUrl = reply->property("uploaded_url").toString();
     reply->deleteLater();
 
     emit statusLog("Upload OK. Requesting OCR...");
+    performOcrRequest();
+}
 
+void RemoteModel::performOcrRequest() {
     QMap<QString, QString> params;
     params.insert("AccessKeyId", accessKeyId);
     params.insert("Action", "RecognizeLicensePlate");
     params.insert("Format", "JSON");
-    params.insert("ImageURL", uploadedUrl);
+    params.insert("ImageURL", currentUploadedUrl);
     params.insert("RegionId", "cn-shanghai");
     params.insert("SignatureMethod", "HMAC-SHA1");
     params.insert("SignatureNonce", QUuid::createUuid().toString().remove('{').remove('}'));
     params.insert("SignatureVersion", "1.0");
-    params.insert("Timestamp", QDateTime::currentDateTimeUtc().toString("yyyy-MM-ddTHH:mm:ssZ"));
+
+    // [核心] 使用校准后的时间
+    params.insert("Timestamp", QDateTime::currentDateTimeUtc().addMSecs(timeOffset).toString("yyyy-MM-ddTHH:mm:ssZ"));
     params.insert("Version", "2019-12-30");
 
     QString apiSignature = calculateApiSignature(params, accessKeySecret);
@@ -128,6 +128,32 @@ void RemoteModel::onApiFinished() {
     if(!reply) return;
 
     QByteArray res = reply->readAll();
+
+    // 检查是否是鉴权错误
+    bool isAuthError = false;
+    QString errorCode = "";
+
+    if(reply->error() != QNetworkReply::NoError) {
+        QJsonDocument doc = QJsonDocument::fromJson(res);
+        if(!doc.isNull() && doc.isObject()) {
+            errorCode = doc.object()["Code"].toString();
+            // 阿里云常见时间错误码
+            if(errorCode == "SignatureDoesNotMatch" || errorCode == "RequestTimeTooSkewed") {
+                isAuthError = true;
+            }
+        }
+    }
+
+    // [自动重试机制]
+    if (isAuthError && retryCount < MAX_RETRIES) {
+        qDebug() << "[Auth] Detected Time Skew. Auto-Correcting...";
+        parseServerTimeAndAdjust(reply); // 1. 校准时间
+        retryCount++;                    // 2. 增加计数
+        emit statusLog(QString("Auth Error. Retrying %1/%2...").arg(retryCount).arg(MAX_RETRIES));
+        performOcrRequest();             // 3. 立即重试
+        reply->deleteLater();
+        return;
+    }
 
     if(reply->error() == QNetworkReply::NoError) {
         QJsonDocument doc = QJsonDocument::fromJson(res);
@@ -164,7 +190,23 @@ void RemoteModel::onApiFinished() {
     reply->deleteLater();
 }
 
-// [核心修复] RFC 3986 编码
+// 解析服务器时间并计算偏差
+void RemoteModel::parseServerTimeAndAdjust(QNetworkReply *reply) {
+    if(!reply->hasRawHeader("Date")) return;
+
+    QString dateStr = reply->rawHeader("Date");
+    QLocale locale(QLocale::English);
+    QDateTime serverTime = locale.toDateTime(dateStr, "ddd, d MMM yyyy HH:mm:ss 'GMT'");
+    serverTime.setTimeSpec(Qt::UTC);
+
+    if(serverTime.isValid()) {
+        QDateTime localTime = QDateTime::currentDateTimeUtc();
+        qint64 newOffset = localTime.msecsTo(serverTime);
+        timeOffset = newOffset;
+        qDebug() << "[Auth] Auto-Calibrated Offset:" << timeOffset << "ms";
+    }
+}
+
 QString RemoteModel::percentEncode(const QString &input) {
     QByteArray ba = input.toUtf8();
     QByteArray res;
