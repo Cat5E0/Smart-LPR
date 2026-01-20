@@ -26,7 +26,6 @@ void VisionEngine::extractColorMask(const cv::Mat &src, cv::Mat &mask) {
     Mat hsv;
     cvtColor(src, hsv, COLOR_BGR2HSV);
 
-    // 使用头文件中的宽松阈值 (S_MIN=20)
     Scalar lower(HSV_H_MIN, HSV_S_MIN, HSV_V_MIN);
     Scalar upper(HSV_H_MAX, HSV_S_MAX, HSV_V_MAX);
 
@@ -57,7 +56,7 @@ void VisionEngine::extractTextureFeatures(const cv::Mat &src, cv::Mat &gray, cv:
 }
 
 // ==========================================
-// 2. 业务逻辑
+// 2. 业务逻辑 (核心修改区域)
 // ==========================================
 
 void VisionEngine::processFrame(cv::Mat frame)
@@ -71,45 +70,51 @@ void VisionEngine::processFrame(cv::Mat frame)
     float scale = 1.0;
     preprocessResize(frame, resizeMat, scale);
 
-    cv::Rect plateRect = detectPlateRobust(resizeMat);
+    // 1. 获取最佳矩形（在 resizeMat 坐标系下）
+    cv::Rect bestRectRaw = detectPlateRobust(resizeMat);
 
-    // 坐标还原
-    if(scale != 1.0 && plateRect.width > 0) {
-        plateRect.x /= scale;
-        plateRect.y /= scale;
-        plateRect.width /= scale;
-        plateRect.height /= scale;
+    // 2. [新增] 计算置信度分数
+    double currentScore = 0.0;
+    if (bestRectRaw.width > 0 && bestRectRaw.height > 0) {
+        currentScore = scorePlate(resizeMat, bestRectRaw);
     }
 
-    // 边界安全检查
-    if(plateRect.x < 0) plateRect.x = 0;
-    if(plateRect.y < 0) plateRect.y = 0;
-    if(plateRect.x + plateRect.width > frame.cols) plateRect.width = frame.cols - plateRect.x;
-    if(plateRect.y + plateRect.height > frame.rows) plateRect.height = frame.rows - plateRect.y;
+    // 3. 坐标还原到原图
+    cv::Rect finalRect = bestRectRaw;
+    if(scale != 1.0 && finalRect.width > 0) {
+        finalRect.x /= scale;
+        finalRect.y /= scale;
+        finalRect.width /= scale;
+        finalRect.height /= scale;
+    }
+
+    // 4. 边界安全检查
+    if(finalRect.x < 0) finalRect.x = 0;
+    if(finalRect.y < 0) finalRect.y = 0;
+    if(finalRect.x + finalRect.width > frame.cols) finalRect.width = frame.cols - finalRect.x;
+    if(finalRect.y + finalRect.height > frame.rows) finalRect.height = frame.rows - finalRect.y;
 
     ProcessResult result;
-    result.found = (plateRect.width > 0 && plateRect.height > 0);
-    result.roi = plateRect;
+    // 只有分数大于0且矩形有效才算找到
+    result.found = (finalRect.width > 0 && finalRect.height > 0 && currentScore > 0);
+    result.roi = finalRect;
+    result.confidenceScore = currentScore; // [新增] 传递分数
 
     if (result.found) {
-        int padW = plateRect.width * 0.15;
-        int padH = plateRect.height * 0.15;
-        cv::Rect padded = plateRect;
-        padded.x = max(0, plateRect.x - padW);
-        padded.y = max(0, plateRect.y - padH);
-        padded.width = min(frame.cols - padded.x, plateRect.width + 2*padW);
-        padded.height = min(frame.rows - padded.y, plateRect.height + 2*padH);
+        int padW = finalRect.width * 0.15;
+        int padH = finalRect.height * 0.15;
+        cv::Rect padded = finalRect;
+        padded.x = max(0, finalRect.x - padW);
+        padded.y = max(0, finalRect.y - padH);
+        padded.width = min(frame.cols - padded.x, finalRect.width + 2*padW);
+        padded.height = min(frame.rows - padded.y, finalRect.height + 2*padH);
 
         result.roi = padded;
         Mat crop = frame(padded);
 
-        if(crop.cols < 120 || crop.rows < 40) {
-            Mat upscaled;
-            resize(crop, upscaled, Size(), 2.0, 2.0, INTER_CUBIC);
-            result.plateImage = matToQImage(upscaled);
-        } else {
-            result.plateImage = matToQImage(crop);
-        }
+        // [核心修正] 删除了这里原本的 if(cols<120) resize(2.0) 的代码
+        // 绝对不要人工放大噪点！直接传原图裁剪，让 RemoteModel 决定是否因为太小而放弃裁剪图。
+        result.plateImage = matToQImage(crop);
     }
 
     result.displayImage = matToQImage(frame);
@@ -135,8 +140,8 @@ cv::Rect VisionEngine::detectPlateRobust(const cv::Mat &src)
     double maxScore = -1.0;
 
     for(const auto &r : candidates) {
-        // [修复] 尺寸初筛：过滤掉不可能的极小框
-        if(r.width < 60 || r.height < 20) continue;
+        // 尺寸初筛
+        if(r.width < 40 || r.height < 12) continue; // 放宽下限，交给混合策略处理
         if(r.width > src.cols / 2 || r.height > src.rows / 2) continue;
 
         // 长宽比初筛
@@ -204,10 +209,8 @@ bool VisionEngine::verifySizes(const cv::RotatedRect &candidate) {
 
     if(aspect < 1.2 || aspect > 7.0) return false;
 
-    // [核心修复] 提升最小尺寸门槛
-    // 之前是 <30，太小了，导致截取到噪点发给阿里云报错 InvalidImage
-    // 现在要求至少 64x24
-    if(longSide < 64 || shortSide < 24) return false;
+    // [修正] 这里的限制不要太死，太小的在 processFrame 里会被混合策略拦截上传原图
+    if(longSide < 40 || shortSide < 12) return false;
     if(longSide > 1000) return false;
 
     return true;
@@ -233,11 +236,11 @@ double VisionEngine::scorePlate(const cv::Mat &src, const cv::Rect &rect) {
 
     double blueRatio = (double)countNonZero(blueMask) / safeRect.area();
 
-    // [关键修改] 不要因为蓝色少 (<0.05) 就直接 return -1.0
-    // 雨天、夜晚、反光会导致蓝色丢失，只要纹理好，也要保留
+    // [关键修改] 不要因为蓝色少 (<0.05) 就直接判死刑
+    // 雨天、逆光、黑白模式下蓝色会丢失，给一个保底分 0.3
     double colorScore = 0.0;
     if (blueRatio < 0.05) {
-        colorScore = 0.1; // 低分保底
+        colorScore = 0.3; // 保底分，允许纹理极好的非蓝牌通过
     } else {
         colorScore = 0.5 + blueRatio; // 高分奖励
     }
@@ -268,10 +271,6 @@ double VisionEngine::scorePlate(const cv::Mat &src, const cv::Rect &rect) {
     }
     double avgJumps = (validLines > 0) ? (double)totalJumps / validLines : 0;
 
-    // ---------------------------------------------------------
-    // 3. 综合打分
-    // ---------------------------------------------------------
-
     // A. 纹理分
     double textureScore = 0.0;
     if (avgJumps < 5) textureScore = 0.01;
@@ -286,16 +285,13 @@ double VisionEngine::scorePlate(const cv::Mat &src, const cv::Rect &rect) {
     double ratioScore = 1.0 - abs(ratio - 3.5) / 5.0;
     if(ratioScore < 0) ratioScore = 0;
 
-    // D. 尺寸惩罚
+    // C. 尺寸惩罚
     double sizePenalty = 1.0;
-    if(safeRect.width > src.cols * 0.55) sizePenalty = 0.2;
+    if(safeRect.width > src.cols * 0.6) sizePenalty = 0.2;
 
-    // 最终得分
     double effectiveArea = min((double)safeRect.area(), 40000.0);
 
-    // 只有当纹理和颜色都极差时，才认为是垃圾
-    if(textureScore < 0.2 && colorScore < 0.2) return -1.0;
-
+    // 综合加权
     return effectiveArea * ratioScore * textureScore * colorScore * sizePenalty;
 }
 

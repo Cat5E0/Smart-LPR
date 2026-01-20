@@ -16,9 +16,8 @@
 #include <QHeaderView>
 #include <QPropertyAnimation>
 #include <QtConcurrent>
-#include <cmath> // [新增] 用于数学计算
+#include <cmath>
 
-// === CCPD 映射表 ===
 const QStringList PROVINCES = {
     "皖", "沪", "津", "渝", "冀", "晋", "蒙", "辽", "吉", "黑",
     "苏", "浙", "京", "闽", "赣", "鲁", "豫", "鄂", "湘", "粤",
@@ -26,7 +25,6 @@ const QStringList PROVINCES = {
     "警", "学", "O"
 };
 
-// [修正] 原代码里是数字 '0'，CCPD标准其实是字母 'O'
 const QStringList ALPHABETS = {
     "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N",
     "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "O"
@@ -87,7 +85,6 @@ void MainWindow::setupUi()
 
     QHBoxLayout *mainLay = new QHBoxLayout(center);
 
-    // --- 左侧 ---
     QGroupBox *grpList = new QGroupBox("测试队列");
     QVBoxLayout *listLay = new QVBoxLayout(grpList);
     listFileQueue = new QListWidget;
@@ -108,7 +105,6 @@ void MainWindow::setupUi()
     listLay->addLayout(navLay);
     mainLay->addWidget(grpList, 1);
 
-    // --- 中间 ---
     QGroupBox *grpVideo = new QGroupBox("视图 [红框:Baseline | 绿框:Method]");
     QVBoxLayout *vl = new QVBoxLayout(grpVideo);
     lblVideo = new QLabel;
@@ -117,7 +113,6 @@ void MainWindow::setupUi()
     lblVideo->setScaledContents(false);
     lblVideo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
 
-    // 统计面板
     QGroupBox *grpStats = new QGroupBox("实时效能分析 (Real-time Metrics)");
     QVBoxLayout *statLayout = new QVBoxLayout(grpStats);
 
@@ -125,8 +120,6 @@ void MainWindow::setupUi()
     lblCurrentMode->setStyleSheet("font-weight: bold; color: blue; font-size: 14px;");
     statLayout->addWidget(lblCurrentMode);
 
-    // [UI 修改] 扩展表格列数，增加 Weather 和 Tilt
-    // 列定义: FPS, AP, Normal, Weather, Rotate, Tilt, Blur, Challenge, DB
     tableMainStats = new QTableWidget(2, 9);
     QStringList headers;
     headers << "FPS" << "AP (All)" << "Normal" << "Weather" << "Rotate" << "Tilt" << "Blur" << "Challenge" << "DB";
@@ -150,7 +143,6 @@ void MainWindow::setupUi()
     vl->addWidget(grpStats, 1);
     mainLay->addWidget(grpVideo, 3);
 
-    // --- 右侧 ---
     QVBoxLayout *rightLay = new QVBoxLayout;
     QGroupBox *grpCtrl = new QGroupBox("控制台");
     QVBoxLayout *gl = new QVBoxLayout(grpCtrl);
@@ -215,64 +207,33 @@ void MainWindow::setupUi()
     mainLay->addLayout(rightLay, 1);
 }
 
-// ==========================================================
-// [核心修复] 分类逻辑: 唯成分论，文件名里有啥就是啥
-// ==========================================================
 QString MainWindow::extractCategory(const QString &filePath) {
     QString fileName = QFileInfo(filePath).fileName();
     QString lowerName = fileName.toLower();
-
-    // 1. Weather (天气): 包含 weather
     if (lowerName.contains("weather")) return "Weather";
-
-    // 2. Rotate (旋转): 包含 rotate
     if (lowerName.contains("rotate")) return "Rotate";
-
-    // 3. Tilt (倾斜): 包含 tilt
     if (lowerName.contains("tilt")) return "Tilt";
-
-    // 4. Blur (模糊): 包含 blur
     if (lowerName.contains("blur")) return "Blur";
-
-    // 5. DB (困难背景/双层): 包含 db
     if (lowerName.contains("db")) return "DB";
-
-    // 6. FN (极难/漏检): 包含 fn
     if (lowerName.contains("fn")) return "FN";
-
-    // 7. Challenge (挑战): 包含 challenge
     if (lowerName.contains("challenge")) return "Challenge";
-
-    // 8. Base (基础): 包含 base -> 归为 Normal
     if (lowerName.contains("base")) return "Normal";
-
-    // 9. 兜底策略: 如果文件名里没有任何标记，默认归为 Normal
-    // 不要再去算角度了！因为Base数据本身就有角度，会导致误判。
     return "Normal";
 }
 
 QString MainWindow::parseGroundTruth(const QString &fileName) {
     QString base = QFileInfo(fileName).baseName();
     QStringList parts = base.split("-");
-
-    // CCPD文件名格式: Area-Tilt-BBox-Vertices-LP-Brightness-Blurriness
-    // 车牌信息在第5部分 (索引4)
     if (parts.size() >= 5) {
         QString labelPart = parts[4];
         QStringList codes = labelPart.split("_");
         if (codes.size() >= 7) {
             QString plate = "";
             bool ok = true;
-
-            // 省份
             int provIdx = codes[0].toInt();
             if(provIdx >= 0 && provIdx < PROVINCES.size()) plate += PROVINCES[provIdx]; else ok=false;
-
-            // 字母 (CCPD中 'O' 是填充位，不是数字0)
             int alphaIdx = codes[1].toInt();
             if(alphaIdx >= 0 && alphaIdx < ALPHABETS.size()) plate += ALPHABETS[alphaIdx]; else ok=false;
-
-            // 后5位
             for(int i=2; i < codes.size(); i++) {
                 int adIdx = codes[i].toInt();
                 if(adIdx >= 0 && adIdx < ADS.size()) plate += ADS[adIdx]; else ok=false;
@@ -280,7 +241,6 @@ QString MainWindow::parseGroundTruth(const QString &fileName) {
             if(ok) return plate;
         }
     }
-    // 如果解析失败，直接返回文件名作为真值（方便排查）
     return base;
 }
 
@@ -315,9 +275,7 @@ void MainWindow::onBtnBatchProcess() {
     while (it.hasNext()) {
         QString filePath = it.next();
         QString fileName = QFileInfo(filePath).fileName();
-
         if (filePath.contains("/Analysis_Result/")) continue;
-        // 过滤非 CCPD 格式文件 (必须包含 '-')
         if (!fileName.contains("-")) continue;
 
         QFileInfo fi(filePath);
@@ -336,8 +294,6 @@ void MainWindow::onBtnBatchProcess() {
     }
 
     lblBatchStatus->setText(QString("已加载: %1 张").arg(loadedFiles.size()));
-
-    // 重置表格 (9列)
     for(int r=0; r<2; r++) for(int c=0; c<9; c++)
         tableMainStats->setItem(r, c, new QTableWidgetItem("-"));
 }
@@ -372,7 +328,6 @@ void MainWindow::startBenchmarkPhase() {
     if (currentStage == STAGE_BASELINE || !checkAutoCompare->isChecked()) {
         currentBatchData.clear();
         listFileQueue->clear();
-
         statsBase = MethodStats();
         statsMethod = MethodStats();
 
@@ -386,9 +341,7 @@ void MainWindow::startBenchmarkPhase() {
             listFileQueue->addItem(info.truth);
         }
     } else {
-        for(auto &item : currentBatchData) {
-            item.processed = false;
-        }
+        for(auto &item : currentBatchData) item.processed = false;
     }
 
     QString stageName = (currentStage == STAGE_BASELINE) ? "Baseline" : "Method";
@@ -401,7 +354,6 @@ void MainWindow::startBenchmarkPhase() {
 
 void MainWindow::processNextBatchItem() {
     if(!isBatchRunning) return;
-
     if(currentBatchIndex >= currentBatchData.size()) {
         finishBenchmarkPhase();
         return;
@@ -430,7 +382,6 @@ void MainWindow::processNextBatchItem() {
 void MainWindow::drawBoxesAndShow(const cv::Mat &src, const cv::Rect &rectBase, const cv::Rect &rectMethod) {
     if(src.empty()) return;
     cv::Mat draw = src.clone();
-
     if(rectBase.width > 0 && rectBase.height > 0) {
         cv::rectangle(draw, rectBase, cv::Scalar(0, 0, 255), 5);
         cv::putText(draw, "Base", rectBase.tl() - cv::Point(0, 10), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0,0,255), 2);
@@ -446,18 +397,15 @@ void MainWindow::showToast(const QString &text) {
     QDialog *toast = new QDialog(this, Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnTopHint);
     toast->setAttribute(Qt::WA_TranslucentBackground);
     toast->setAttribute(Qt::WA_DeleteOnClose);
-
     QVBoxLayout *layout = new QVBoxLayout(toast);
     QLabel *lbl = new QLabel(text);
     lbl->setStyleSheet("background-color: rgba(0, 120, 215, 230); color: white; border-radius: 8px; padding: 15px 40px; font-size: 18px; font-weight: bold;");
     lbl->setAlignment(Qt::AlignCenter);
     layout->addWidget(lbl);
     layout->setMargin(0);
-
     toast->adjustSize();
     toast->move(this->geometry().center() - toast->rect().center());
     toast->show();
-
     QTimer::singleShot(2500, toast, [=]() {
         QPropertyAnimation *anim = new QPropertyAnimation(toast, "windowOpacity");
         anim->setDuration(500);
@@ -470,7 +418,6 @@ void MainWindow::showToast(const QString &text) {
 
 void MainWindow::finishBenchmarkPhase() {
     isBatchRunning = false;
-
     if (currentStage == STAGE_BASELINE) {
         if (checkAutoCompare->isChecked()) {
             showToast("Baseline 阶段完成，即将开始 Method 阶段...");
@@ -483,31 +430,25 @@ void MainWindow::finishBenchmarkPhase() {
             showToast("Baseline 评估完成！");
         }
     } else {
-        showToast("所有评估已完成！结果已显示在表格中。");
+        showToast("所有评估已完成！");
         currentStage = IDLE;
         lblCurrentMode->setText("Mode: Idle");
     }
 }
 
-// [UI 刷新] 支持9列数据
 void MainWindow::updateTableUI() {
     auto updateRow = [&](int row, const MethodStats &stats) {
         double fps = 0.0;
         if (stats.totalTimeMs > 0) fps = (double)stats.totalProcessed / (stats.totalTimeMs / 1000.0);
         tableMainStats->setItem(row, 0, new QTableWidgetItem(QString::number(fps, 'f', 1)));
-
         double ap = 0.0;
         if(stats.all.count > 0) ap = (double)stats.all.correct / stats.all.count * 100.0;
         QTableWidgetItem *itemAP = new QTableWidgetItem(QString::number(ap, 'f', 1) + "%");
         itemAP->setTextAlignment(Qt::AlignCenter);
         if(ap > 90.0) itemAP->setForeground(Qt::darkGreen);
         tableMainStats->setItem(row, 1, itemAP);
-
-        // 对应 setupUi 里的列顺序:
-        // Normal, Weather, Rotate, Tilt, Blur, Challenge, DB
         QStringList cats;
         cats << "Normal" << "Weather" << "Rotate" << "Tilt" << "Blur" << "Challenge" << "DB";
-
         for(int i=0; i<cats.size(); i++) {
             QString cat = cats[i];
             QString text = "-";
@@ -523,34 +464,27 @@ void MainWindow::updateTableUI() {
             tableMainStats->setItem(row, 2 + i, it);
         }
     };
-
     updateRow(0, statsBase);
     updateRow(1, statsMethod);
 }
 
 void MainWindow::onCloudResult(QString plate, double conf, QRect rect) {
     if (!isBatchRunning) return;
-
     long now = QDateTime::currentMSecsSinceEpoch();
     long cost = now - itemStartTime;
     BatchItem &item = currentBatchData[currentBatchIndex];
     item.processed = true;
-
     QString cleanRes = cleanPlateString(plate);
     QString cleanGt = cleanPlateString(item.groundTruth);
     bool isCorrect = (cleanRes == cleanGt && !cleanRes.isEmpty());
-
     MethodStats *s = (currentStage == STAGE_BASELINE) ? &statsBase : &statsMethod;
     s->totalTimeMs += cost;
     s->totalProcessed++;
-
     s->all.count++;
     if(isCorrect) s->all.correct++;
-
     if(!s->subsets.contains(item.category)) s->subsets[item.category] = SubsetStats();
     s->subsets[item.category].count++;
     if(isCorrect) s->subsets[item.category].correct++;
-
     if (currentStage == STAGE_BASELINE) {
         item.plateBase = plate;
         item.timeBase = cost;
@@ -561,19 +495,19 @@ void MainWindow::onCloudResult(QString plate, double conf, QRect rect) {
         item.timeMethod = cost;
         item.correctMethod = isCorrect;
     }
-
     updateListItemStatus(currentBatchIndex);
     updateTableUI();
     displayResultToUI(item);
     drawBoxesAndShow(currentMat, item.rectBase, item.rectMethod);
-
     QString modeName = (currentStage == STAGE_BASELINE) ? "Baseline" : "Method";
     Logger::log(item.fileName, modeName, plate, item.groundTruth, isCorrect, conf, 0, 0, cost, true);
-
     currentBatchIndex++;
     QTimer::singleShot(2200, this, &MainWindow::processNextBatchItem);
 }
 
+// ==========================================================
+// [核心修复] 混合策略实施点
+// ==========================================================
 void MainWindow::onVisionProcessed(ProcessResult result) {
     if (!isBatchRunning) return;
     BatchItem &item = currentBatchData[currentBatchIndex];
@@ -581,41 +515,44 @@ void MainWindow::onVisionProcessed(ProcessResult result) {
     drawBoxesAndShow(currentMat, item.rectBase, item.rectMethod);
 
     QImage imageToUpload;
-    if (result.found && !result.plateImage.isNull()) {
+    QString strategyLog;
+
+    // [核心策略] 智能判断：OpenCV 结果是否可信？
+    // 条件：找到了 + 置信度高 (>0.6) + 截图尺寸够大 (>80px)
+    // 注意：80px 是 API 能稳定识别的经验下限
+    bool isReliable = result.found &&
+                      (result.confidenceScore > 0.6) &&
+                      (result.plateImage.width() > 80);
+
+    if (isReliable) {
+        // A. 相信 OpenCV，上传裁剪图 (节省带宽/费用)
         showImageInLabel(result.plateImage, lblPlateImage);
         imageToUpload = result.plateImage;
+        strategyLog = QString("Method Strategy: CROP (Score: %1)").arg(result.confidenceScore);
     } else {
-        lblPlateImage->clear();
-        imageToUpload = visionEngine->matToQImage(currentMat);
+        // B. OpenCV 不靠谱，上传原图 (保准确率)
+        // 使用 result.displayImage (即原图)
+        lblPlateImage->clear(); // 界面上清空裁剪图以示区别
+        imageToUpload = result.displayImage;
+        strategyLog = QString("Method Strategy: FULL (Fallback, Score: %1)").arg(result.confidenceScore);
     }
 
+    onLogMsg(strategyLog);
     remoteModel->recognizeLicensePlate(imageToUpload);
 }
 
-// ==========================================================
-// [核心修复] 统计 Bug: 失败的样本必须计入总分母 (all.count)
-// ==========================================================
 void MainWindow::onCloudError(QString errorMsg) {
     if (!isBatchRunning) { onLogMsg("Err: " + errorMsg); return; }
-
     long now = QDateTime::currentMSecsSinceEpoch();
     long cost = now - itemStartTime;
     BatchItem &item = currentBatchData[currentBatchIndex];
     item.processed = true;
-
-    // --- 修复开始 ---
     MethodStats *s = (currentStage == STAGE_BASELINE) ? &statsBase : &statsMethod;
     s->totalTimeMs += cost;
-    s->totalProcessed++; // 总数+1
-
-    s->all.count++; // 准确率分母+1
-    // s->all.correct 不加，因为失败了
-
-    // 子集统计也要加分母
+    s->totalProcessed++;
+    s->all.count++;
     if(!s->subsets.contains(item.category)) s->subsets[item.category] = SubsetStats();
     s->subsets[item.category].count++;
-    // --- 修复结束 ---
-
     if(currentStage == STAGE_BASELINE) {
         item.plateBase = "FAILED";
         item.timeBase = cost;
@@ -626,17 +563,12 @@ void MainWindow::onCloudError(QString errorMsg) {
         item.successMethod = false;
     }
     item.errorReason = errorMsg;
-
     onLogMsg(QString("[%1] Err: %2").arg(item.groundTruth).arg(errorMsg));
-
     updateListItemStatus(currentBatchIndex);
-    updateTableUI(); // 实时刷新表格
-
+    updateTableUI();
     displayResultToUI(item);
-
     QString modeName = (currentStage == STAGE_BASELINE) ? "Baseline" : "Method";
     Logger::log(item.fileName, modeName, "Error", item.groundTruth, false, 0, 0, 0, cost, false);
-
     currentBatchIndex++;
     QTimer::singleShot(2200, this, &MainWindow::processNextBatchItem);
 }
@@ -645,7 +577,7 @@ QString MainWindow::cleanPlateString(const QString &input) {
     QString res;
     for(QChar c : input) {
         if(c.isLetterOrNumber() || (c.script() == QChar::Script_Han)) {
-            if(c == 'O') res.append('0'); // 这里是清洗结果，为了对比方便
+            if(c == 'O') res.append('0');
             else res.append(c);
         }
     }

@@ -19,9 +19,10 @@ struct PipelineDebugData {
 struct ProcessResult {
     bool found;
     cv::Rect roi;
-    QImage displayImage;
-    QImage plateImage;
+    QImage displayImage; // 原始全图（用于兜底上传）
+    QImage plateImage;   // 裁剪车牌（用于高质量上传）
     long costMs;
+    double confidenceScore = 0.0; // [新增] 置信度分数 (0.0 - 1.0)
 };
 
 class VisionEngine : public QObject
