@@ -4,42 +4,40 @@
 #include <QMainWindow>
 #include <QLabel>
 #include <QPushButton>
-#include <QRadioButton>
-#include <QButtonGroup>
 #include <QTextEdit>
 #include <QTimer>
 #include <QThread>
 #include <QListWidget>
 #include <QCheckBox>
-#include <opencv2/opencv.hpp>
-#include <QStringList>
-#include <QVector>
 #include <QTableWidget>
+#include <QMap>
+#include <opencv2/opencv.hpp>
 
-// 包含必要的自定义头文件
 #include "visionengine.h"
 #include "remotemodel.h"
 #include "imageprocessor.h"
+#include "coloranalyzer.h" // [新增]
 
-// [结构体定义] 批处理项
 struct BatchItem {
     QString filePath;
     QString fileName;
-    QString groundTruth; // 真值
+    QString groundTruth;
+    QString category;
 
-    // --- Baseline (全云端) 数据 ---
+    // --- Baseline ---
     QString plateBase;
-    cv::Rect rectBase;   // 红色框
-    long timeBase;       // 耗时
+    cv::Rect rectBase;
+    long timeBase;
     bool successBase;
+    bool correctBase;
 
-    // --- Method (OpenCV+云) 数据 ---
+    // --- Method ---
     QString plateMethod;
-    cv::Rect rectMethod; // 绿色框
-    long timeMethod;     // 耗时
+    cv::Rect rectMethod;
+    long timeMethod;
     bool successMethod;
+    bool correctMethod;
 
-    // 状态
     bool processed;
     QString errorReason;
 
@@ -52,19 +50,24 @@ struct BatchItem {
         timeMethod = 0;
         processed = false;
         successBase = false;
+        correctBase = false;
         successMethod = false;
+        correctMethod = false;
+        category = "Other";
     }
 };
 
-// [结构体定义] 统计指标
-struct BenchmarkMetrics {
-    int totalCount = 0;
-    int successCount = 0;
-    int correctCount = 0;
-    long minTime = 999999, maxTime = 0, totalTime = 0;
-    double avgTime = 0.0;
-    double fps = 0.0;
-    double networkThroughput = 0.0;
+struct SubsetStats {
+    int count = 0;
+    int correct = 0;
+};
+
+struct MethodStats {
+    long totalTimeMs = 0;
+    int totalProcessed = 0;
+
+    SubsetStats all;
+    QMap<QString, SubsetStats> subsets;
 };
 
 class MainWindow : public QMainWindow
@@ -81,6 +84,12 @@ private slots:
     void onBtnRun();
     void onBtnExportErrors();
     void onBtnDebugCV();
+
+    // [新增] 触发颜色分析
+    void onBtnAnalyzeColor();
+    // [新增] 颜色分析回调
+    void onAnalysisProgress(int current, int total);
+    void onAnalysisFinished(QString path);
 
     void onBtnPrev();
     void onBtnNext();
@@ -99,34 +108,37 @@ private:
     void startBenchmarkPhase();
     void processNextBatchItem();
     void finishBenchmarkPhase();
-    void showComparisonReport();
+    void showToast(const QString &msg);
 
     void displayResultToUI(const BatchItem &item);
     void displayBatchItem(int index);
 
     QString parseGroundTruth(const QString &fileName);
+    QString extractCategory(const QString &filePath);
+
+    void updateTableUI();
+
     void updateListItemStatus(int index);
     QString cleanPlateString(const QString &input);
 
-    // UI 组件指针
     QLabel *lblVideo;
     QLabel *lblPlateImage;
     QLabel *lblResTruth;
     QLabel *lblResBase;
     QLabel *lblResMethod;
-    QLabel *lblStatMin;
-    QLabel *lblStatMax;
-    QLabel *lblStatAvg;
-    QLabel *lblStatTotalTime;
     QLabel *lblCurrentMode;
     QListWidget *listFileQueue;
     QLabel *lblBatchStatus;
+
+    QTableWidget *tableMainStats;
 
     QPushButton *btnFile;
     QPushButton *btnBatch;
     QPushButton *btnRun;
     QPushButton *btnExport;
     QPushButton *btnDebugCV;
+    QPushButton *btnAnalyzeColor; // [新增]
+
     QPushButton *btnPrev;
     QPushButton *btnNext;
     QCheckBox *checkAutoCompare;
@@ -137,6 +149,7 @@ private:
     QThread *visionThread;
     RemoteModel *remoteModel;
     ImageProcessor *imgProcessor;
+    ColorAnalyzer *colorAnalyzer; // [新增]
 
     cv::Mat currentMat;
     bool isBatchRunning;
@@ -145,10 +158,10 @@ private:
     enum RunStage { IDLE, STAGE_BASELINE, STAGE_METHOD };
     RunStage currentStage;
 
-    BenchmarkMetrics baselineMetrics;
-    BenchmarkMetrics methodMetrics;
+    MethodStats statsBase;
+    MethodStats statsMethod;
 
-    struct FileInfo { QString path; QString name; QString truth; };
+    struct FileInfo { QString path; QString name; QString truth; QString category; };
     QVector<FileInfo> loadedFiles;
 
     int currentBatchIndex;

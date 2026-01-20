@@ -1,4 +1,4 @@
-QT       += core gui network
+QT       += core gui network concurrent
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
 CONFIG += c++11
@@ -9,6 +9,7 @@ TEMPLATE = app
 
 # 源文件 (严格对应你截图中的文件名)
 SOURCES += \
+    coloranalyzer.cpp \
     imageprocessor.cpp \
     logger.cpp \
     main.cpp \
@@ -19,6 +20,7 @@ SOURCES += \
 
 # 头文件
 HEADERS += \
+    coloranalyzer.h \
     imageprocessor.h \
     logger.h \
     mainwindow.h \

@@ -17,15 +17,31 @@ RemoteModel::~RemoteModel() {}
 
 void RemoteModel::recognizeLicensePlate(const QImage &image) {
     if(image.isNull()) { emit errorOccurred("Image is Null"); return; }
+
+    // --- [优化1] 智能缩放：防止云端暴力压缩 ---
+    // CCPD原图分辨率较高，直接上传会被云端强制压缩导致模糊。
+    // 主动缩放到 OCR 最佳宽度 (约 2048px)，并使用高质量插值。
+    QImage uploadImg = image;
+    if (uploadImg.width() > 2048) {
+        uploadImg = uploadImg.scaledToWidth(2048, Qt::SmoothTransformation);
+    }
+    // ---------------------------------------
+
     currentImageData.clear();
     QBuffer buffer(&currentImageData);
     buffer.open(QIODevice::WriteOnly);
-    image.save(&buffer, "JPG", 95);
+
+    // --- [优化2] 格式优化：使用 PNG 无损格式 ---
+    // 避免 JPG 压缩带来的边缘噪点（Ringing Artifacts）
+    uploadImg.save(&buffer, "PNG");
+    // ---------------------------------------
+
     if(currentImageData.size() == 0) { emit errorOccurred("Image Buffer Empty"); return; }
 
     emit statusLog(QString("Uploading... (%1 KB)").arg(currentImageData.size() / 1024.0));
 
-    QString objectName = "lpr_auto_" + QUuid::createUuid().toString(QUuid::Id128) + ".jpg";
+    // [注意] 后缀名改为 .png
+    QString objectName = "lpr_auto_" + QUuid::createUuid().toString(QUuid::Id128) + ".png";
     QString host = QString("%1.oss-%2.aliyuncs.com").arg(bucketName).arg(region);
     QString ossUrl = "https://" + host + "/" + objectName;
 
@@ -34,7 +50,9 @@ void RemoteModel::recognizeLicensePlate(const QImage &image) {
     QString dateShort = now.toString("yyyyMMdd");
 
     QString canonicalUri = "/" + bucketName + "/" + objectName;
-    QString canonicalHeaders = "content-type:image/jpeg\n"
+
+    // [注意] Content-Type 必须与实际上传格式一致，否则签名会挂
+    QString canonicalHeaders = "content-type:image/png\n"
                                "host:" + host + "\n"
                                "x-oss-content-sha256:UNSIGNED-PAYLOAD\n"
                                "x-oss-date:" + isoDate + "\n";
@@ -52,7 +70,8 @@ void RemoteModel::recognizeLicensePlate(const QImage &image) {
                          .arg(accessKeyId).arg(dateShort).arg(region).arg(additionalHeaders).arg(ossSignature);
 
     QNetworkRequest request((QUrl(ossUrl)));
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "image/jpeg");
+    // [注意] 请求头也要改为 image/png
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "image/png");
     request.setRawHeader("Host", host.toUtf8());
     request.setRawHeader("x-oss-date", isoDate.toUtf8());
     request.setRawHeader("x-oss-content-sha256", "UNSIGNED-PAYLOAD");
