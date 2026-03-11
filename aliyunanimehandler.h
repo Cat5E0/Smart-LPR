@@ -21,8 +21,8 @@ private:
     QNetworkAccessManager *netManager;
 
     // 阿里云配置
-    const QString accessKeyId = "LTAI5tRktaGKnLTgxUb4FVRw";
-    const QString accessKeySecret = "gNASf41xb4CnUZ7rXfPV4wpjyv7x2U";
+    const QString accessKeyId = "*******";
+    const QString accessKeySecret = "*********";
     const QString bucketName = "qt-ubuntu"; // 你的Bucket名
     const QString region = "cn-shanghai";
 
